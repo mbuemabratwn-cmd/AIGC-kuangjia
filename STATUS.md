@@ -584,3 +584,216 @@
 - Kept the cursor-adjacent active-state styling aligned with the same inline mention selection semantics
 - Verified frontend production build
 - Review result: no remaining P1+ findings for this round
+
+### Provider Reference Reliability Round 1
+
+- Reviewed the reference-image strategy with `karpathy-guidelines` and narrowed the fix to provider request correctness rather than UI redesign
+- Fixed GPT Image 2 moderation enforcement so every GPT-family request is forced to `low` server-side, independent of frontend state
+- Corrected `gpt-image-2-vip` 4K size mappings to match the provided APIYI 30-size table
+- Changed multi-image generation (`n=1..4`) to run up to 4 provider calls in parallel from the backend, avoiding unsupported `n` forwarding for VIP
+- Removed unsupported `quality` and `n` fields from VIP text-to-image requests
+- Kept GPT official reference-image edits on multipart `image[]` and VIP reference-image edits on repeated multipart `image`
+- Changed VIP reference-image edit requests to use `size=auto`, avoiding provider size-budget failures on edit/fusion requests while preserving locked sizes for VIP text-to-image
+- Fixed Nano Banana Pro / Gemini requests to use Bearer authorization, `generationConfig.imageConfig`, and camelCase `inlineData`
+- Changed Gemini reference images so local persisted assets and remote URLs are converted to inline image bytes before provider submission, avoiding unreachable `127.0.0.1` file URLs
+- Added backend tests covering:
+  - GPT moderation low enforcement
+  - GPT/VIP text-to-image request fields
+  - GPT/VIP multipart edit fields and reference order
+  - Gemini local/remote reference image inline payloads
+  - Gemini ratio/resolution payload fields
+  - reference asset content-hash deduplication
+  - multi-image backend fan-out
+  - history reference URL persistence
+  - configured output folder, project-folder save, and delete flows
+- Verified backend syntax check
+- Verified backend unit tests: 19 tests passed
+- Verified frontend production build
+- Restarted the local backend on `127.0.0.1:8000`
+- Verified backend health endpoint after restart
+- Review result: no remaining P1+ findings in local request-construction and persistence paths
+- Remaining external risk: provider-side visual adherence to reference images still requires real generation result inspection, but the local code now verifies that references are sent to each provider in a reachable format and preserved order
+
+### Provider Reference Reliability Round 2
+
+- Investigated the latest `gpt-image-2-vip` frontend `502 Bad Gateway`
+- Confirmed the actual backend failure was `Download failed: Forbidden`, not a reference upload or size-validation failure
+- Root cause: VIP was requested with `response_format=url`, then the backend had to download the returned provider URL and that URL returned `403 Forbidden`
+- Changed VIP text-to-image and VIP image-edit requests to use `response_format=b64_json`
+- Kept existing local base64 save logic, so VIP results no longer depend on a second download from a temporary provider URL
+- Updated backend tests to assert VIP requests now use `b64_json`
+- Verified backend syntax check
+- Verified backend unit tests: 19 tests passed
+- Verified frontend production build
+- Restarted the backend on `127.0.0.1:8000`
+- Verified backend health endpoint after restart
+- Review result: no remaining P1+ findings for the VIP 403-download failure path
+
+### Provider Reference Reliability Round 3
+
+- Re-investigated repeated `gpt-image-2-vip` failures after the `b64_json` change
+- Confirmed latest failures changed from local `Download failed: Forbidden` to provider-side generic failures with trace IDs
+- Reviewed the current VIP edit request shape against the APIYI VIP edit documentation
+- Identified a new P1 issue: VIP reference-image edit requests were still sending `size=auto`, so the frontend-selected `3:4 · 4K` was not being passed as the documented fixed VIP size
+- Changed VIP reference-image edit requests to send the resolved pixel size, e.g. `3:4 · 4K` -> `2480x3312`
+- Kept `response_format=b64_json` to avoid the prior provider URL download `403`
+- Updated backend tests to assert VIP edit requests use the resolved pixel size
+- Verified backend syntax check
+- Verified backend unit tests: 19 tests passed
+- Verified frontend production build
+- Restarted the backend on `127.0.0.1:8000`
+- Verified backend health endpoint after restart
+- Review result: no remaining local P1+ findings in the VIP request-construction path
+- Remaining external risk: a real VIP 4K edit request must be retried to determine whether the provider accepts `2480x3312` with references or still fails upstream
+
+### UI Refinement Round 34
+
+- Added a gallery hover action named `参考生图` on completed generated images
+- The existing `生成同款` action remains on the hover overlay and still replaces prompt/reference images with the selected job's original inputs
+- `参考生图` appends the generated image's local `/generated/...` URL into the current reference image list without replacing the current prompt or existing references
+- New generated-image references are appended after the current reference order and are deduplicated by URL so repeated clicks do not add duplicates
+- Added backend coverage proving generated image URLs can be reused as reference images and are downloaded into provider file payloads
+- Verified backend syntax check
+- Verified backend unit tests: 20 tests passed
+- Verified frontend production build
+- Verified backend health endpoint
+- Review result: no remaining P1+ findings for this round
+
+### UI Refinement Round 35
+
+- Made gallery hover action buttons respond to the current gallery card size
+- Added container-based sizing so `生成同款` and `参考生图` reduce padding, font size, and edge offsets when cards become small
+- Kept the existing hover behavior and action placement unchanged
+- Verified frontend production build
+- Review result: no remaining P1+ findings for this round
+
+### Windows Share Round 1
+
+- Added `start-windows.bat` for a one-click Windows startup flow
+- The script checks for Python and npm, creates `.venv`, installs backend dependencies, installs frontend dependencies, creates local data folders, starts backend/frontend windows, and opens `http://127.0.0.1:5173`
+- Added `WINDOWS_SHARE.md` explaining how to package a clean copy for a friend
+- The share guide explicitly removes `data/app.db`, generated images, reference assets, `.venv`, and `node_modules`
+- The share guide keeps `apps/api/.env` so the same Supabase configuration can be reused while the friend enters their own API keys in settings
+- Verified backend syntax check
+- Verified backend unit tests: 20 tests passed
+- Verified frontend production build
+- Review result: no remaining P1+ findings for this round
+
+### Provider Error Handling Round 1
+
+- Investigated the latest official `gpt-image-2` failure shown as `400 Bad Request`
+- Confirmed the failing backend job was rejected by the provider safety system with `safety_violations=[sexual]`
+- Confirmed the official `gpt-image-2` request path is still functional because a later `gpt-image-2` job completed successfully
+- Added provider safety-error normalization so future safety rejections show a Chinese, actionable message instead of only exposing a generic 400
+- Preserved useful diagnostics in the user-facing error, including violation type and provider request ID when present
+- Verified backend syntax check
+- Verified backend unit tests: 21 tests passed
+- Verified frontend production build
+- Review result: no remaining local P1+ findings for request construction or safety-error display in this round
+- Remaining external risk: provider moderation is not deterministic from local code; prompts/reference images that trigger upstream safety policy can still fail, but now the app identifies that failure mode clearly
+
+### History Loading Round 1
+
+- Investigated why the gallery appeared empty after switching the frontend to a new port
+- Confirmed the database was not cleared: `data/app.db` still had 67 job records and `data/generated` still had generated image files
+- Confirmed `/api/jobs` was returning history, but recent jobs included very large original `data:image/...base64` reference inputs in `image_urls`
+- Changed the history list serializer to return stable `reference_image_urls` in `image_urls` when available, keeping the list response lightweight while preserving full detail serialization internally
+- Added backend coverage for lightweight history-list serialization
+- Verified backend syntax check
+- Verified backend unit tests: 22 tests passed
+- Verified frontend production build
+- Restarted backend on `127.0.0.1:8001`
+- Verified `/api/jobs` returns 20 history rows and the latest row's `image_urls` payload is now a small stable reference URL instead of a large base64 blob
+- Review result: no remaining P1+ findings for history loading after port changes
+
+### History Loading Round 2
+
+- Re-investigated the gallery still appearing empty on frontend port `6677`
+- Confirmed the root cause was CORS, not missing data: backend middleware still only allowed `5173`, so browser requests from `http://127.0.0.1:6677` were blocked
+- Changed backend CORS policy to allow local development origins on any `127.0.0.1` / `localhost` port with `allow_origin_regex`
+- Added backend coverage to lock the local-port CORS policy
+- Verified backend syntax check
+- Verified backend unit tests: 23 tests passed
+- Verified frontend production build
+- Restarted backend on `127.0.0.1:8001`
+- Verified with a real `Origin: http://127.0.0.1:6677` request that `/api/jobs` now returns `access-control-allow-origin: http://127.0.0.1:6677`
+- Verified `/api/jobs` still returns 20 history rows and the latest row has a completed result image
+- Review result: no remaining local P1+ findings for gallery history loading from the new frontend port
+
+### Reference Reuse Round 1
+
+- Investigated broken reference thumbnails after clicking `生成同款`
+- Confirmed the database still contained old stable reference URLs pointing at `http://127.0.0.1:8000/reference-assets/...`
+- Root cause: the backend hardcoded local reference asset URLs to port `8000`, while the active backend is now `8001`
+- Changed `LOCAL_API_BASE_URL` to default to `http://127.0.0.1:8001` and support `AIGC_LOCAL_API_BASE_URL` override for future port changes
+- Added backend serialization normalization so old `localhost` / `127.0.0.1` reference asset URLs are rewritten to the current local API base URL
+- Added frontend reuse fallback so any old local `/reference-assets/` URL is mapped to the current `API_BASE_URL` before being placed back into the editor
+- Added backend coverage for old-port reference asset URL rewriting
+- Verified backend syntax check
+- Verified backend unit tests: 24 tests passed
+- Verified frontend production build
+- Restarted backend on `127.0.0.1:8001`
+- Verified `/api/jobs` no longer contains `:8000/reference-assets/` and now contains `:8001/reference-assets/`
+- Verified a rewritten reference asset URL returns `200 image/png`
+- Review result: no remaining local P1+ findings for `生成同款` reference thumbnail recovery
+
+### Port Migration Round 1
+
+- Moved the local backend from the common `8001` port to the less common `38381`
+- Updated backend `LOCAL_API_BASE_URL` default to `http://127.0.0.1:38381`
+- Added frontend `VITE_API_BASE_URL` support with a default of `http://127.0.0.1:38381`
+- Added TypeScript `ImportMeta.env` typing for the new frontend environment variable
+- Updated `start-windows.bat` to start the backend on `38381` and set `AIGC_LOCAL_API_BASE_URL` consistently
+- Updated `WINDOWS_SHARE.md` to document backend port `38381`
+- Verified no production code still hardcodes old backend ports `8000` or `8001`
+- Verified backend syntax check
+- Verified backend unit tests: 24 tests passed
+- Verified frontend production build
+- Restarted local backend on `127.0.0.1:38381` and frontend on `127.0.0.1:6677`
+- Verified `/api/jobs` returns 20 history rows and reference asset URLs now use `:38381`
+- Verified CORS allows `http://127.0.0.1:6677` to access `http://127.0.0.1:38381`
+- Review result: no remaining local P1+ findings for the backend port migration
+
+### Prompt Reference Editing Round 1
+
+- Investigated Slate prompt editor bugs after typing `=数字` to insert a reference image mention
+- Root cause: `insertPromptReference` inserted a space after the inline-void reference and then moved the cursor backward, leaving selection between the reference node and the space instead of in a real text node after the reference
+- Secondary issue: delete handling treated any adjacent reference range as already selected, so deleting after typed text could select/delete the reference unexpectedly
+- Changed reference insertion to insert the reference node plus an explicit following empty text node, then move selection into that following text node
+- Changed deletion handling so the first Backspace/Delete selects the reference node and only a second keypress deletes it when the current selection exactly equals the reference node range
+- Verified with a minimal Slate transform script that insertion produces `[text, reference, trailing text]` and selection lands at the trailing text point
+- Verified backend syntax check and backend unit tests: 24 tests passed
+- Verified frontend production build
+- Restarted frontend on `127.0.0.1:6677`
+- Review result: no remaining local P1+ findings for reference mention cursor placement and two-step deletion semantics
+
+### Prompt Reference Editing Round 2
+
+- Reproduced the remaining mid-sentence insertion bug with a minimal Slate transform script
+- Confirmed the previous `Transforms.move(..., unit: "offset")` fix was still wrong for mid-sentence insertion because Slate already placed selection at the text point immediately after the inline-void reference
+- The extra move skipped the first following character, matching the observed cursor jump after `微`
+- Removed the explicit cursor move from `insertPromptReference`
+- Verified with a minimal Slate script that both mid-sentence and sentence-end insertion now leave selection at the text node immediately after the reference, offset `0`
+- Verified no `Transforms.move(editor...)` prompt-reference insertion logic remains
+- Verified backend unit tests: 24 tests passed
+- Verified frontend production build
+- Restarted frontend on `127.0.0.1:6677`
+- Review result: no remaining local P1+ findings for mid-sentence reference insertion
+
+### Prompt Reference Editing Round 3
+
+- Investigated the remaining IME bug where only one visible character could be typed after an inline image reference unless a real space existed after it
+- Root cause: an empty text node after a Slate inline-void reference is not a stable composition anchor for Chinese IME in this browser/Slate setup
+- Added an invisible `\uFEFF` anchor text node after each prompt reference mention so IME has a real text position after the inline-void node without showing a visible space
+- Updated prompt serialization to strip the invisible anchor before saving/submitting prompt text, so provider prompts remain unchanged
+- Updated prompt deserialization so reused/history references get the same invisible anchor
+- Updated Backspace/Delete handling so pressing delete next to the invisible anchor selects the reference node instead of deleting the anchor first
+- Updated reference deletion to remove only the deleted reference's adjacent invisible anchor while preserving anchors after other reference mentions
+- Verified with Slate scripts:
+  - inserted references serialize without the invisible anchor
+  - selection lands after the invisible anchor and before the following visible text
+  - deleting one reference removes only its adjacent anchor and preserves anchors for other references
+- Verified backend unit tests: 24 tests passed
+- Verified frontend production build
+- Restarted frontend on `127.0.0.1:6677`
+- Review result: no remaining local P1+ findings for Chinese IME typing after inline image references
