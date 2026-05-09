@@ -111,7 +111,7 @@ type PromptParagraphElement = {
 type PromptDescendant = PromptParagraphElement | PromptReferenceElement | PromptTextNode;
 
 
-const API_BASE_URL = "http://127.0.0.1:8000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:38381";
 const MODEL_OPTIONS = [
   "gpt-image-2",
   "gpt-image-2-vip",
@@ -184,6 +184,7 @@ const MAX_PANEL_RATIO = 0.68;
 const MIN_PREVIEW_PANEL_WIDTH_PX = 360;
 const MIN_EDITOR_PANEL_WIDTH_PX = 452;
 const REFERENCE_DRAFT_STORAGE_KEY = "aigc-reference-draft-v1";
+const FAVORITE_JOB_IDS_STORAGE_KEY = "aigc-favorite-job-ids-v1";
 const MAX_REFERENCE_IMAGE_EDGE = 1536;
 const REFERENCE_IMAGE_QUALITY = 0.82;
 const EMPTY_PROMPT_DOCUMENT: PromptParagraphElement[] = [
@@ -192,6 +193,7 @@ const EMPTY_PROMPT_DOCUMENT: PromptParagraphElement[] = [
     children: [{ text: "" }],
   },
 ];
+const PROMPT_REFERENCE_ANCHOR = "\uFEFF";
 
 const withPromptReferences = (editor: ReactEditor & Editor) => {
   const { isInline, isVoid } = editor;
@@ -233,6 +235,8 @@ export default function App() {
   const [currentJob, setCurrentJob] = useState<JobResponse | null>(null);
   const [history, setHistory] = useState<JobResponse[]>([]);
   const [viewerJobId, setViewerJobId] = useState<string | null>(null);
+  const [favoriteJobIds, setFavoriteJobIds] = useState<string[]>(() => loadFavoriteJobIds());
+  const [galleryMode, setGalleryMode] = useState<"all" | "favorites">("all");
   const [projectSaveState, setProjectSaveState] = useState<ProjectSaveStatus>("idle");
   const [projectSaveMessage, setProjectSaveMessage] = useState("");
   const [savingProjectName, setSavingProjectName] = useState<string | null>(null);
@@ -315,6 +319,10 @@ export default function App() {
     form.reference_names,
     form.reference_ids,
   ]);
+
+  useEffect(() => {
+    saveFavoriteJobIds(favoriteJobIds);
+  }, [favoriteJobIds]);
 
   useEffect(() => {
     let cancelled = false;
@@ -612,6 +620,24 @@ export default function App() {
     }));
   }
 
+  function appendReferenceImageUrl(imageUrl: string, name: string) {
+    setForm((current) => {
+      if (current.reference_images.includes(imageUrl)) {
+        return current;
+      }
+
+      return {
+        ...current,
+        reference_images: [...current.reference_images, imageUrl],
+        reference_names: [...current.reference_names, name],
+        reference_ids: [
+          ...current.reference_ids,
+          createReferenceImageId(name, imageUrl, current.reference_ids.length),
+        ],
+      };
+    });
+  }
+
   async function handleGenerate(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setJobState("submitting");
@@ -745,6 +771,7 @@ export default function App() {
         createReferenceImageId(`reference-${index + 1}`, image, index),
       ),
     }));
+    setViewerJobId(null);
   }
 
   async function handleDeleteJob(jobId: string) {
@@ -815,9 +842,13 @@ export default function App() {
   const modelLabel = formatModelLabel(form.model);
   const qualityLabel = formatQualityLabel(form.quality);
   const moderationLabel = formatModerationLabel(form.moderation);
-  const galleryJobs = currentJob
+  const allGalleryJobs = currentJob
     ? mergeJobIntoHistory(history, currentJob)
     : history;
+  const galleryJobs =
+    galleryMode === "favorites"
+      ? allGalleryJobs.filter((job) => favoriteJobIds.includes(job.id))
+      : allGalleryJobs;
   const galleryCardSize = Math.max(144, 320 - galleryDensity * 22);
   const galleryGridClassName =
     galleryDensity >= 7 ? "gallery-grid gallery-grid-dense" : "gallery-grid";
@@ -828,6 +859,14 @@ export default function App() {
     ? galleryJobs.findIndex((job) => job.id === viewerJobId)
     : -1;
   const viewerJob = viewerIndex >= 0 ? galleryJobs[viewerIndex] : null;
+
+  function toggleFavoriteJob(jobId: string) {
+    setFavoriteJobIds((current) =>
+      current.includes(jobId)
+        ? current.filter((item) => item !== jobId)
+        : [jobId, ...current],
+    );
+  }
 
   return (
     <main className="app-shell">
@@ -1159,8 +1198,8 @@ export default function App() {
                         );
                         if (deletionTarget) {
                           event.preventDefault();
-                          if (Range.includes(deletionTarget.range, promptEditor.selection?.anchor ?? deletionTarget.range.anchor) && !Range.isCollapsed(deletionTarget.range)) {
-                            Transforms.delete(promptEditor, { at: deletionTarget.range });
+                          if (isPromptReferenceSelected(promptEditor, deletionTarget.range)) {
+                            removePromptReference(promptEditor, deletionTarget.path);
                             return;
                           }
 
@@ -1400,24 +1439,42 @@ export default function App() {
         <section className="workspace-section workspace-preview">
           <div className="section-header gallery-header">
             <h2>图片列表</h2>
-            <div className="gallery-density-control" aria-label="调整图片列表密度">
-              <span>大</span>
-              <input
-                type="range"
-                min="1"
-                max="8"
-                step="1"
-                value={galleryDensity}
-                onChange={(event) => setGalleryDensity(Number(event.target.value))}
-              />
-              <span>小</span>
+            <div className="gallery-header-actions">
+              <button
+                type="button"
+                className={`gallery-favorites-toggle ${
+                  galleryMode === "favorites" ? "gallery-favorites-toggle-active" : ""
+                }`}
+                onClick={() =>
+                  setGalleryMode((current) => (current === "favorites" ? "all" : "favorites"))
+                }
+              >
+                收藏
+              </button>
+
+              <div className="gallery-density-control" aria-label="调整图片列表密度">
+                <span>大</span>
+                <input
+                  type="range"
+                  min="1"
+                  max="8"
+                  step="1"
+                  value={galleryDensity}
+                  onChange={(event) => setGalleryDensity(Number(event.target.value))}
+                />
+                <span>小</span>
+              </div>
             </div>
           </div>
 
           {galleryJobs.length === 0 ? (
             <div className="empty-state">
-              <p>还没有图片。</p>
-              <span>提交任务后，新的图片会自动出现在这里。</span>
+              <p>{galleryMode === "favorites" ? "还没有收藏图片。" : "还没有图片。"}</p>
+              <span>
+                {galleryMode === "favorites"
+                  ? "在图片卡片右上角点收藏后，会显示在这里。"
+                  : "提交任务后，新的图片会自动出现在这里。"}
+              </span>
             </div>
           ) : (
             <div className={galleryGridClassName}>
@@ -1443,6 +1500,16 @@ export default function App() {
                         </button>
                         <div className="gallery-save-menu">
                           <div className="gallery-card-actions">
+                            <button
+                              type="button"
+                              className={`gallery-favorite-trigger ${
+                                favoriteJobIds.includes(job.id) ? "gallery-favorite-trigger-active" : ""
+                              }`}
+                              aria-label={favoriteJobIds.includes(job.id) ? "取消收藏" : "收藏图片"}
+                              onClick={() => toggleFavoriteJob(job.id)}
+                            >
+                              <StarIcon filled={favoriteJobIds.includes(job.id)} />
+                            </button>
                             <div className="gallery-save-trigger-shell">
                               <button
                                 type="button"
@@ -1501,6 +1568,18 @@ export default function App() {
                           onClick={() => handleReuseJob(job)}
                         >
                           生成同款
+                        </button>
+                        <button
+                          type="button"
+                          className="gallery-reference-button"
+                          onClick={() =>
+                            appendReferenceImageUrl(
+                              toGeneratedUrl(job.result_paths[0]),
+                              `生成图 ${job.created_at}`,
+                            )
+                          }
+                        >
+                          参考生图
                         </button>
                       </>
                     ) : job.status === "failed" ? (
@@ -1861,6 +1940,20 @@ function CopyIcon() {
   );
 }
 
+function StarIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="m12 3.6 2.56 5.18 5.72.83-4.14 4.03.98 5.69L12 16.64 6.88 19.33l.98-5.69-4.14-4.03 5.72-.83L12 3.6Z"
+        fill={filled ? "currentColor" : "none"}
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 type DropdownFieldProps = {
   id: string;
   label: string;
@@ -2169,10 +2262,26 @@ function createFailedGalleryJob(job: JobResponse, message: string): JobResponse 
 
 function getJobReferenceImages(job: JobResponse): string[] {
   if (Array.isArray(job.reference_image_urls) && job.reference_image_urls.length > 0) {
-    return job.reference_image_urls;
+    return job.reference_image_urls.map(normalizeReferenceImageUrl);
   }
 
-  return Array.isArray(job.image_urls) ? job.image_urls : [];
+  return Array.isArray(job.image_urls) ? job.image_urls.map(normalizeReferenceImageUrl) : [];
+}
+
+function normalizeReferenceImageUrl(imageUrl: string): string {
+  try {
+    const parsed = new URL(imageUrl);
+    if (
+      (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost") &&
+      parsed.pathname.startsWith("/reference-assets/")
+    ) {
+      return `${API_BASE_URL}${parsed.pathname}`;
+    }
+  } catch {
+    return imageUrl;
+  }
+
+  return imageUrl;
 }
 
 function createReferenceImageId(fileName: string, image: string, index: number): string {
@@ -2251,6 +2360,32 @@ function saveReferenceDraft(draft: ReferenceDraft): void {
     window.localStorage.setItem(REFERENCE_DRAFT_STORAGE_KEY, JSON.stringify(draft));
   } catch {
     // Data URLs can exceed localStorage quota; generation still works for the current session.
+  }
+}
+
+function loadFavoriteJobIds(): string[] {
+  try {
+    const raw = window.localStorage.getItem(FAVORITE_JOB_IDS_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter((item): item is string => typeof item === "string");
+  } catch {
+    return [];
+  }
+}
+
+function saveFavoriteJobIds(ids: string[]): void {
+  try {
+    window.localStorage.setItem(FAVORITE_JOB_IDS_STORAGE_KEY, JSON.stringify(ids));
+  } catch {
+    // Ignore localStorage write errors; favorites will still work for the current session.
   }
 }
 
@@ -2469,6 +2604,7 @@ function serializePrompt(value: PromptParagraphElement[]): string {
   return value
     .map((node) => serializePromptNode(node))
     .join("\n")
+    .replace(new RegExp(PROMPT_REFERENCE_ANCHOR, "g"), "")
     .replace(/\u00a0/g, " ");
 }
 
@@ -2519,6 +2655,7 @@ function buildPromptChildrenFromText(
         referenceNumber,
         children: [{ text: "" }],
       });
+      parts.push({ text: PROMPT_REFERENCE_ANCHOR });
     } else {
       parts.push({ text: match[0] });
     }
@@ -2588,12 +2725,33 @@ function findReferenceMatches(query: string, referenceCount: number): number[] {
 function getPromptReferenceDeletionTarget(
   editor: Editor,
   key: "Backspace" | "Delete",
-): { range: Range } | null {
-  if (!editor.selection || !Range.isCollapsed(editor.selection)) {
+): { path: Path; range: Range } | null {
+  if (!editor.selection) {
     return null;
   }
 
+  if (!Range.isCollapsed(editor.selection)) {
+    const selectedEntry = Editor.above(editor, {
+      at: editor.selection,
+      match: (node) => SlateElement.isElement(node) && isPromptReferenceElement(node),
+    });
+    if (!selectedEntry) {
+      return null;
+    }
+
+    const [, selectedPath] = selectedEntry;
+    return {
+      path: selectedPath,
+      range: Editor.range(editor, selectedPath),
+    };
+  }
+
   const currentPoint = editor.selection.anchor;
+  const anchorTarget = getPromptReferenceAnchorTarget(editor, currentPoint, key);
+  if (anchorTarget) {
+    return anchorTarget;
+  }
+
   const adjacentPoint = key === "Backspace"
     ? Editor.before(editor, currentPoint, { unit: "offset" })
     : Editor.after(editor, currentPoint, { unit: "offset" });
@@ -2611,8 +2769,64 @@ function getPromptReferenceDeletionTarget(
 
   const [, path] = entry;
   return {
+    path,
     range: Editor.range(editor, path),
   };
+}
+
+function getPromptReferenceAnchorTarget(
+  editor: Editor,
+  point: Point,
+  key: "Backspace" | "Delete",
+): { path: Path; range: Range } | null {
+  const [node] = Editor.node(editor, point.path);
+  if (!Text.isText(node)) {
+    return null;
+  }
+
+  if (key === "Backspace" && point.offset === PROMPT_REFERENCE_ANCHOR.length) {
+    const anchorText = node.text.slice(0, PROMPT_REFERENCE_ANCHOR.length);
+    if (anchorText === PROMPT_REFERENCE_ANCHOR) {
+      return getPreviousPromptReferenceTarget(editor, point.path);
+    }
+  }
+
+  if (key === "Delete" && point.offset === 0) {
+    const anchorText = node.text.slice(0, PROMPT_REFERENCE_ANCHOR.length);
+    if (anchorText === PROMPT_REFERENCE_ANCHOR) {
+      return getPreviousPromptReferenceTarget(editor, point.path);
+    }
+  }
+
+  return null;
+}
+
+function getPreviousPromptReferenceTarget(
+  editor: Editor,
+  path: Path,
+): { path: Path; range: Range } | null {
+  if (path[path.length - 1] <= 0) {
+    return null;
+  }
+
+  const previousPath = Path.previous(path);
+  const previousNode = Node.get(editor, previousPath);
+  if (!SlateElement.isElement(previousNode) || !isPromptReferenceElement(previousNode)) {
+    return null;
+  }
+
+  return {
+    path: previousPath,
+    range: Editor.range(editor, previousPath),
+  };
+}
+
+function isPromptReferenceSelected(editor: Editor, range: Range): boolean {
+  if (!editor.selection || Range.isCollapsed(editor.selection)) {
+    return false;
+  }
+
+  return Range.equals(editor.selection, range);
 }
 
 function insertPromptReference(editor: Editor, referenceNumber: number) {
@@ -2621,9 +2835,42 @@ function insertPromptReference(editor: Editor, referenceNumber: number) {
     referenceNumber,
     children: [{ text: "" }],
   };
-  Transforms.insertNodes(editor, referenceNode);
-  Transforms.insertText(editor, " ");
-  Transforms.move(editor, { distance: 1, unit: "offset", reverse: true });
+
+  Transforms.insertNodes(editor, [
+    referenceNode,
+    { text: PROMPT_REFERENCE_ANCHOR },
+  ]);
+}
+
+function removePromptReference(editor: Editor, path: Path) {
+  const cleanupPath = Path.hasPrevious(path) ? Path.previous(path) : path;
+  Transforms.removeNodes(editor, { at: path });
+  removePromptReferenceAnchorsAt(editor, cleanupPath);
+  removePromptReferenceAnchorsAt(editor, path);
+}
+
+function removePromptReferenceAnchorsAt(editor: Editor, path: Path) {
+  if (!Node.has(editor, path)) {
+    return;
+  }
+
+  const node = Node.get(editor, path);
+  if (!Text.isText(node) || !node.text.includes(PROMPT_REFERENCE_ANCHOR)) {
+    return;
+  }
+
+  for (let index = node.text.length - 1; index >= 0; index -= 1) {
+    if (node.text[index] !== PROMPT_REFERENCE_ANCHOR) {
+      continue;
+    }
+
+    Transforms.delete(editor, {
+      at: {
+        anchor: { path, offset: index },
+        focus: { path, offset: index + PROMPT_REFERENCE_ANCHOR.length },
+      },
+    });
+  }
 }
 
 function PromptElement({

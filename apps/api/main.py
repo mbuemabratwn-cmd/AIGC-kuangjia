@@ -1,9 +1,11 @@
 import base64
 import binascii
+import concurrent.futures
 import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -48,7 +50,7 @@ REFERENCE_ASSET_DIR = Path(__file__).resolve().parents[2] / "data" / "reference-
 REFERENCE_ASSET_DIR.mkdir(parents=True, exist_ok=True)
 APIYI_BASE_URL = "https://api.apiyi.com"
 APIYI_NATIVE_BASE_URL = f"{APIYI_BASE_URL}/v1beta/models"
-LOCAL_API_BASE_URL = "http://127.0.0.1:8000"
+LOCAL_API_BASE_URL = os.environ.get("AIGC_LOCAL_API_BASE_URL", "http://127.0.0.1:38381")
 PROVIDER_TIMEOUT_SECONDS = 300
 SUPABASE_SIGNED_URL_TTL_SECONDS = 3600
 GPT_MODEL = "gpt-image-2"
@@ -181,12 +183,12 @@ GPT_VIP_SIZE_MAP = {
     },
     "4K": {
         "1:1": "2880x2880",
-        "2:3": "2560x3840",
-        "3:2": "3840x2560",
-        "3:4": "2880x3840",
-        "4:3": "3840x2880",
-        "4:5": "3072x3840",
-        "5:4": "3840x3072",
+        "2:3": "2336x3520",
+        "3:2": "3520x2336",
+        "3:4": "2480x3312",
+        "4:3": "3312x2480",
+        "4:5": "2560x3216",
+        "5:4": "3216x2560",
         "9:16": "2160x3840",
         "16:9": "3840x2160",
         "21:9": "3840x1632",
@@ -195,7 +197,7 @@ GPT_VIP_SIZE_MAP = {
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origin_regex=r"^http://(127\.0\.0\.1|localhost):\d+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -522,7 +524,7 @@ def validate_job_payload(payload: JobCreatePayload) -> dict[str, Any]:
 
     resolution = normalize_resolution(payload.resolution)
     quality = normalize_quality(payload.quality)
-    moderation = normalize_moderation(payload.moderation)
+    moderation = "low" if model in GPT_MODELS else normalize_moderation(payload.moderation)
     background = normalize_background(payload.background)
     output_format = normalize_output_format(payload.output_format)
 
@@ -781,6 +783,8 @@ def delete_job_record(job_id: str) -> None:
 
 def serialize_job(row: sqlite3.Row) -> dict[str, Any]:
     model = normalize_model_identifier(row["model"])
+    image_urls = normalize_local_reference_urls(json.loads(row["image_urls"]))
+    reference_image_urls = normalize_local_reference_urls(json.loads(row["reference_image_urls"]))
     return {
         "id": row["id"],
         "model": model,
@@ -793,8 +797,8 @@ def serialize_job(row: sqlite3.Row) -> dict[str, Any]:
         "output_format": row["output_format"],
         "output_compression": row["output_compression"],
         "n": row["image_count"],
-        "image_urls": json.loads(row["image_urls"]),
-        "reference_image_urls": json.loads(row["reference_image_urls"]),
+        "image_urls": image_urls,
+        "reference_image_urls": reference_image_urls,
         "mask_url": row["mask_url"],
         "status": row["status"],
         "remote_task_id": row["remote_task_id"],
@@ -803,6 +807,27 @@ def serialize_job(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def serialize_job_for_list(row: sqlite3.Row) -> dict[str, Any]:
+    serialized = serialize_job(row)
+    if serialized["reference_image_urls"]:
+        serialized["image_urls"] = serialized["reference_image_urls"]
+    return serialized
+
+
+def normalize_local_reference_urls(values: list[str]) -> list[str]:
+    return [normalize_local_reference_url(value) for value in values]
+
+
+def normalize_local_reference_url(value: str) -> str:
+    parsed = urllib_parse.urlparse(value)
+    if parsed.path.startswith("/reference-assets/") and parsed.hostname in {
+        "127.0.0.1",
+        "localhost",
+    }:
+        return build_reference_asset_url(Path(urllib_parse.unquote(parsed.path)).name)
+    return value
 
 
 def normalize_gemini_size(value: str) -> str:
@@ -829,7 +854,7 @@ def perform_json_request(request: urllib_request.Request) -> dict[str, Any]:
             return json.loads(response.read().decode("utf-8"))
     except urllib_error.HTTPError as exc:
         body = exc.read().decode("utf-8")
-        message = parse_provider_error(body, exc.reason)
+        message = format_provider_error(parse_provider_error(body, exc.reason))
         raise ProviderError(exc.code, message) from exc
     except urllib_error.URLError as exc:
         raise ProviderError(502, str(exc.reason)) from exc
@@ -856,7 +881,58 @@ def parse_provider_error(body: str, fallback: str) -> str:
     return fallback
 
 
+def format_provider_error(message: str) -> str:
+    if is_provider_safety_error(message):
+        violation_match = re.search(r"safety_violations=\[([^\]]+)\]", message)
+        request_match = re.search(r"(?:request id|request-id|req(?:uest)?_id)[:= ]+([A-Za-z0-9_-]+)", message)
+        details: list[str] = []
+        if violation_match:
+            details.append(f"违规类型：{violation_match.group(1)}")
+        if request_match:
+            details.append(f"请求ID：{request_match.group(1)}")
+        suffix = f"（{'，'.join(details)}）" if details else ""
+        return (
+            "内容安全审核拦截：请弱化或移除涉性、未成年、裸露、亲密姿态等描述，"
+            f"或更换参考图后重试。{suffix}"
+        )
+    return message
+
+
+def is_provider_safety_error(message: str) -> bool:
+    normalized = message.lower()
+    return (
+        "safety_violations=" in normalized
+        or "rejected by the safety system" in normalized
+        or "moderation_blocked" in normalized
+    )
+
+
 def submit_provider_job(
+    job_id: str,
+    api_key: str,
+    payload: dict[str, Any],
+) -> list[str]:
+    image_count = int(payload.get("n", 1))
+    if image_count > 1:
+        result_paths: list[str] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(image_count, 4)) as executor:
+            futures = [
+                executor.submit(
+                    submit_single_provider_job,
+                    f"{job_id}_{index}",
+                    api_key,
+                    {**payload, "n": 1},
+                )
+                for index in range(image_count)
+            ]
+            for future in futures:
+                result_paths.extend(future.result())
+        return result_paths
+
+    return submit_single_provider_job(job_id, api_key, payload)
+
+
+def submit_single_provider_job(
     job_id: str,
     api_key: str,
     payload: dict[str, Any],
@@ -879,16 +955,18 @@ def submit_gpt_image_job(job_id: str, api_key: str, payload: dict[str, Any]) -> 
         "model": payload["model"],
         "prompt": payload["prompt"],
         "size": resolve_gpt_size(payload["model"], payload["size"], payload["resolution"]),
-        "quality": payload["quality"],
         "output_format": payload["output_format"],
-        "n": payload["n"],
     }
 
     if payload["model"] == GPT_MODEL:
+        request_payload["quality"] = payload["quality"]
         request_payload["background"] = payload["background"]
         request_payload["moderation"] = payload["moderation"]
+        request_payload["n"] = payload["n"]
         if payload["output_compression"] is not None:
             request_payload["output_compression"] = payload["output_compression"]
+    else:
+        request_payload["response_format"] = "b64_json"
 
     if payload["image_urls"]:
         request_payload["image_urls"] = payload["image_urls"]
@@ -911,13 +989,18 @@ def submit_gpt_image_edit_job(job_id: str, api_key: str, payload: dict[str, Any]
     form_fields = [
         ("model", payload["model"]),
         ("prompt", payload["prompt"]),
-        ("size", resolve_gpt_size(payload["model"], payload["size"], payload["resolution"])),
     ]
     if payload["model"] == GPT_MODEL:
+        form_fields.append(
+            ("size", resolve_gpt_size(payload["model"], payload["size"], payload["resolution"]))
+        )
         form_fields.append(("quality", payload["quality"]))
         form_fields.append(("moderation", payload["moderation"]))
     else:
-        form_fields.append(("response_format", "url"))
+        form_fields.append(
+            ("size", resolve_gpt_size(payload["model"], payload["size"], payload["resolution"]))
+        )
+        form_fields.append(("response_format", "b64_json"))
 
     files: list[tuple[str, str, str, bytes]] = []
     image_field_name = "image[]" if payload["model"] == GPT_MODEL else "image"
@@ -962,7 +1045,7 @@ def submit_gemini_image_job(job_id: str, api_key: str, payload: dict[str, Any]) 
         f"{APIYI_NATIVE_BASE_URL}/{urllib_parse.quote(payload['model'])}:generateContent",
         data=json.dumps(request_payload).encode("utf-8"),
         headers={
-            "x-goog-api-key": api_key,
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
         method="POST",
@@ -992,25 +1075,40 @@ def build_gemini_request_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if payload["image_urls"]:
         parts = [text_part]
         for image_url in payload["image_urls"]:
-            if is_data_url(image_url):
-                content_type, raw_bytes = decode_data_url(image_url)
-                parts.append(
-                    {
-                        "inline_data": {
-                            "mime_type": content_type,
-                            "data": base64.b64encode(raw_bytes).decode("ascii"),
-                        }
-                    }
-                )
-            else:
-                parts.append({"file_data": {"file_uri": image_url}})
+            parts.append(build_gemini_image_part(image_url))
         contents = [{"parts": parts}]
 
     return {
         "contents": contents,
         "generationConfig": {
             "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": {
+                "aspectRatio": payload["size"],
+                "imageSize": payload["resolution"],
+            },
         },
+    }
+
+
+def build_gemini_image_part(image_url: str) -> dict[str, Any]:
+    if is_data_url(image_url):
+        content_type, raw_bytes = decode_data_url(image_url)
+        return build_gemini_inline_image_part(content_type, raw_bytes)
+
+    if is_reference_asset_url(image_url):
+        content_type, raw_bytes, _ = load_reference_asset(image_url)
+        return build_gemini_inline_image_part(content_type, raw_bytes)
+
+    content_type, raw_bytes = download_reference_image(image_url)
+    return build_gemini_inline_image_part(content_type, raw_bytes)
+
+
+def build_gemini_inline_image_part(content_type: str, raw_bytes: bytes) -> dict[str, Any]:
+    return {
+        "inlineData": {
+            "mimeType": content_type,
+            "data": base64.b64encode(raw_bytes).decode("ascii"),
+        }
     }
 
 
@@ -1699,7 +1797,7 @@ def get_job(job_id: str) -> dict[str, Any]:
 
 @app.get("/api/jobs")
 def list_jobs() -> list[dict[str, Any]]:
-    return [serialize_job(row) for row in list_job_records()]
+    return [serialize_job_for_list(row) for row in list_job_records()]
 
 
 def delete_job_by_id(job_id: str) -> dict[str, Any]:
