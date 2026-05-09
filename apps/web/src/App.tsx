@@ -513,6 +513,11 @@ export default function App() {
   }
 
   async function requestSystemDirectory() {
+    if (window.showDirectoryPicker) {
+      const directoryHandle = await window.showDirectoryPicker();
+      return directoryHandle.name;
+    }
+
     try {
       const response = await fetch(`${API_BASE_URL}/api/system/pick-directory`, {
         method: "POST",

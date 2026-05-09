@@ -197,7 +197,10 @@ GPT_VIP_SIZE_MAP = {
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^http://(127\.0\.0\.1|localhost):\d+$",
+    allow_origin_regex=(
+        r"^http://(127\.0\.0\.1|localhost):\d+$"
+        r"|^https://[a-z0-9-]+\.onrender\.com$"
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

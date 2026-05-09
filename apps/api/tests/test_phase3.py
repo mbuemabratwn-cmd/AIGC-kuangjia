@@ -19,14 +19,14 @@ ONE_BY_ONE_PNG = base64.b64decode(
 
 
 class CorsTests(unittest.TestCase):
-    def test_localhost_development_ports_are_allowed(self) -> None:
+    def test_localhost_and_render_origins_are_allowed(self) -> None:
         middleware = next(
             item for item in main.app.user_middleware if item.cls is main.CORSMiddleware
         )
 
         self.assertEqual(
             middleware.options["allow_origin_regex"],
-            r"^http://(127\.0\.0\.1|localhost):\d+$",
+            r"^http://(127\.0\.0\.1|localhost):\d+$|^https://[a-z0-9-]+\.onrender\.com$",
         )
 
 
